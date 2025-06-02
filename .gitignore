@@ -1,0 +1,10 @@
+/*/node_modules
+node_modules
+.yarn/
+.env
+.dev.vars
+.tsbuild
+*.tsbuildinfo
+
+.wrangler
+dist
