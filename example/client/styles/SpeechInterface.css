@@ -1,0 +1,74 @@
+/* Speech interface container */
+.speech-interface {
+	display: flex;
+	gap: 1rem;
+	align-items: center;
+}
+
+/* Speech controls */
+.speech-controls {
+	display: flex;
+	gap: 1rem;
+	align-items: center;
+	margin-right: 200px;
+}
+
+/* Speech button */
+.speech-button {
+	padding: 0.5rem 1rem;
+	border-radius: 4px;
+	border: 1px solid #ccc;
+	background: white;
+	cursor: pointer;
+	transition: all 0.2s ease;
+	min-width: 120px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 0.5rem;
+}
+
+.speech-button.listening {
+	background: #e6f7ff;
+	border-color: #1890ff;
+	animation: pulse 2s infinite;
+}
+
+.speech-button.ai-speaking {
+	background: #f6ffed;
+	border-color: #52c41a;
+}
+
+.speech-button:disabled {
+	opacity: 0.7;
+	cursor: not-allowed;
+}
+
+/* Voice selector */
+.voice-selector {
+	padding: 0.5rem;
+	border-radius: 4px;
+	border: 1px solid #ccc;
+	background: white;
+	cursor: pointer;
+	min-width: 120px;
+}
+
+/* Error message */
+.speech-error {
+	color: #ff4d4f;
+	margin-top: 0.5rem;
+}
+
+/* Pulse animation */
+@keyframes pulse {
+	0% {
+		transform: scale(1);
+	}
+	50% {
+		transform: scale(1.02);
+	}
+	100% {
+		transform: scale(1);
+	}
+}
