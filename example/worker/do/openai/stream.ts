@@ -4,7 +4,18 @@ import OpenAI from 'openai'
 import { buildPromptMessages } from './prompt'
 import { ISimpleEvent, RESPONSE_FORMAT, SimpleEvent } from './schema'
 
-const MODELS_WITH_JSON_SUPPORT = ['gpt-4.1-2025-04-14', 'gpt-4o-2024-11-20', 'o4-mini-2025-04-16']
+const MODELS_WITH_JSON_SUPPORT = [
+	'gpt-4.1-2025-04-14',
+	'gpt-4o-2024-11-20',
+	'o4-mini-2025-04-16',
+	'gpt-4o-realtime-preview-2024-12-17',
+	'gpt-4o-mini-realtime-preview-2024-12-17',
+]
+
+const REALTIME_MODELS = [
+	'gpt-4o-realtime-preview-2024-12-17',
+	'gpt-4o-mini-realtime-preview-2024-12-17',
+]
 
 /**
  * Prompt the OpenAI model with the given prompt. Stream the events as they come back.
@@ -16,83 +27,200 @@ export async function* streamEvents(
 ): AsyncGenerator<ISimpleEvent> {
 	//console.log(`🌊 Starting stream with model: ${modelName}`)
 
-	const requestOptions: any = {
-		model: modelName,
-		messages: buildPromptMessages(prompt, modelName),
-	}
-
-	// Only add response_format for models that support it
-	if (MODELS_WITH_JSON_SUPPORT.includes(modelName)) {
-		//console.log('📋 Adding JSON response format for supported model')
-		requestOptions.response_format = RESPONSE_FORMAT
-	}
-
-	console.log('📤 Sending streaming request to OpenAI:', {
-		model: modelName,
-		messageCount: requestOptions.messages.length,
-		hasResponseFormat: !!requestOptions.response_format,
-	})
-
-	const stream = model.beta.chat.completions.stream(requestOptions)
-	console.log('🔗 Stream connection established')
-
-	let accumulatedText = '' // Buffer for incoming chunks
-	let cursor = 0
-
-	const events: ISimpleEvent[] = []
-	let maybeUnfinishedEvent: ISimpleEvent | null = null
-
-	// Process the stream as chunks arrive
-	for await (const chunk of stream) {
-		if (!chunk) continue
-
-		// Add the text to the accumulated text
-		const newContent = chunk.choices[0]?.delta?.content ?? ''
-		accumulatedText += newContent
-		if (newContent) {
-			//console.log('📝 Received chunk:', newContent)
+	if (REALTIME_MODELS.includes(modelName)) {
+		// Use v1/realtime endpoint for realtime models
+		const requestOptions = {
+			model: modelName,
+			prompt: buildPromptMessages(prompt, modelName),
+			stream: true,
+			temperature: 0.7,
+			max_tokens: 1000,
 		}
 
-		// Even though the accumulated text is incomplete JSON, try to extract data
-		const json = parse(accumulatedText)
+		console.log('📤 Sending streaming request to realtime API:', {
+			model: modelName,
+			messageCount: requestOptions.prompt.length,
+		})
 
-		// If we have events, iterate over the events...
-		if (Array.isArray(json?.events)) {
-			// Starting at the current cursor, iterate over the events
-			for (let i = cursor, len = json.events.length; i < len; i++) {
-				const part = json.events[i]
-				if (i === cursor) {
-					try {
-						// Check whether it's a valid event using our schema
-						SimpleEvent.parse(part)
+		const response = await fetch('https://api.openai.com/v1/realtime', {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+				'OpenAI-Beta': 'realtime=v1',
+			},
+			body: JSON.stringify(requestOptions),
+		})
 
-						if (i < len) {
-							// If this is valid AND there are additional events, we're done with this one
-							events.push(part)
-							console.log('✨ Generated new event:', part)
-							yield part
-							maybeUnfinishedEvent = null
-							cursor++
-						} else {
-							// This is the last event we've seen so far, so it might still be cooking
-							maybeUnfinishedEvent = part
-							console.log('⏳ Potential event being processed:', part)
+		if (!response.ok) {
+			throw new Error(`OpenAI API error: ${response.status} ${response.statusText}`)
+		}
+
+		const reader = response.body?.getReader()
+		if (!reader) {
+			throw new Error('No response body')
+		}
+
+		console.log('🔗 Stream connection established')
+
+		let accumulatedText = '' // Buffer for incoming chunks
+		let cursor = 0
+
+		const events: ISimpleEvent[] = []
+		let maybeUnfinishedEvent: ISimpleEvent | null = null
+
+		try {
+			while (true) {
+				const { done, value } = await reader.read()
+				if (done) break
+
+				// Parse the SSE data
+				const text = new TextDecoder().decode(value)
+				const lines = text.split('\n')
+
+				for (const line of lines) {
+					if (line.startsWith('data: ')) {
+						const data = line.slice(5)
+						if (data === '[DONE]') continue
+
+						try {
+							const parsed = JSON.parse(data)
+							const newContent = parsed.choices[0]?.text ?? ''
+							accumulatedText += newContent
+							if (newContent) {
+								//console.log('📝 Received chunk:', newContent)
+							}
+
+							// Even though the accumulated text is incomplete JSON, try to extract data
+							const json = parse(accumulatedText)
+
+							// If we have events, iterate over the events...
+							if (Array.isArray(json?.events)) {
+								// Starting at the current cursor, iterate over the events
+								for (let i = cursor, len = json.events.length; i < len; i++) {
+									const part = json.events[i]
+									if (i === cursor) {
+										try {
+											// Check whether it's a valid event using our schema
+											SimpleEvent.parse(part)
+
+											if (i < len) {
+												// If this is valid AND there are additional events, we're done with this one
+												events.push(part)
+												console.log('✨ Generated new event:', part)
+												yield part
+												maybeUnfinishedEvent = null
+												cursor++
+											} else {
+												// This is the last event we've seen so far, so it might still be cooking
+												maybeUnfinishedEvent = part
+												console.log('⏳ Potential event being processed:', part)
+											}
+										} catch {
+											// noop but okay, it's just not done enough to be a valid event
+											//console.log('⚠️ Invalid event format, waiting for more data')
+										}
+									}
+								}
+							}
+						} catch (err) {
+							// Ignore parsing errors for incomplete chunks
 						}
-					} catch {
-						// noop but okay, it's just not done enough to be a valid event
-						//console.log('⚠️ Invalid event format, waiting for more data')
+					}
+				}
+			}
+		} finally {
+			reader.releaseLock()
+		}
+
+		// If we still have an event, then it was the last event to be seen as a JSON object
+		if (maybeUnfinishedEvent) {
+			console.log('✨ Processing final event:', maybeUnfinishedEvent)
+			events.push(maybeUnfinishedEvent)
+			yield maybeUnfinishedEvent
+		}
+
+		console.log(`🏁 Stream completed. Generated ${events.length} events in total`)
+	} else {
+		// Use standard OpenAI client for non-realtime models
+		const requestOptions: any = {
+			model: modelName,
+			messages: buildPromptMessages(prompt, modelName),
+		}
+
+		// Only add response_format for models that support it
+		if (MODELS_WITH_JSON_SUPPORT.includes(modelName)) {
+			//console.log('📋 Adding JSON response format for supported model')
+			requestOptions.response_format = RESPONSE_FORMAT
+		}
+
+		console.log('📤 Sending streaming request to OpenAI:', {
+			model: modelName,
+			messageCount: requestOptions.messages.length,
+			hasResponseFormat: !!requestOptions.response_format,
+		})
+
+		const stream = model.beta.chat.completions.stream(requestOptions)
+		console.log('🔗 Stream connection established')
+
+		let accumulatedText = '' // Buffer for incoming chunks
+		let cursor = 0
+
+		const events: ISimpleEvent[] = []
+		let maybeUnfinishedEvent: ISimpleEvent | null = null
+
+		// Process the stream as chunks arrive
+		for await (const chunk of stream) {
+			if (!chunk) continue
+
+			// Add the text to the accumulated text
+			const newContent = chunk.choices[0]?.delta?.content ?? ''
+			accumulatedText += newContent
+			if (newContent) {
+				//console.log('📝 Received chunk:', newContent)
+			}
+
+			// Even though the accumulated text is incomplete JSON, try to extract data
+			const json = parse(accumulatedText)
+
+			// If we have events, iterate over the events...
+			if (Array.isArray(json?.events)) {
+				// Starting at the current cursor, iterate over the events
+				for (let i = cursor, len = json.events.length; i < len; i++) {
+					const part = json.events[i]
+					if (i === cursor) {
+						try {
+							// Check whether it's a valid event using our schema
+							SimpleEvent.parse(part)
+
+							if (i < len) {
+								// If this is valid AND there are additional events, we're done with this one
+								events.push(part)
+								console.log('✨ Generated new event:', part)
+								yield part
+								maybeUnfinishedEvent = null
+								cursor++
+							} else {
+								// This is the last event we've seen so far, so it might still be cooking
+								maybeUnfinishedEvent = part
+								console.log('⏳ Potential event being processed:', part)
+							}
+						} catch {
+							// noop but okay, it's just not done enough to be a valid event
+							//console.log('⚠️ Invalid event format, waiting for more data')
+						}
 					}
 				}
 			}
 		}
-	}
 
-	// If we still have an event, then it was the last event to be seen as a JSON object
-	if (maybeUnfinishedEvent) {
-		console.log('✨ Processing final event:', maybeUnfinishedEvent)
-		events.push(maybeUnfinishedEvent)
-		yield maybeUnfinishedEvent
-	}
+		// If we still have an event, then it was the last event to be seen as a JSON object
+		if (maybeUnfinishedEvent) {
+			console.log('✨ Processing final event:', maybeUnfinishedEvent)
+			events.push(maybeUnfinishedEvent)
+			yield maybeUnfinishedEvent
+		}
 
-	console.log(`🏁 Stream completed. Generated ${events.length} events in total`)
+		console.log(`🏁 Stream completed. Generated ${events.length} events in total`)
+	}
 }

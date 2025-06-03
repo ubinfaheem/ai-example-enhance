@@ -1,17 +1,46 @@
 import { FormEventHandler, useCallback, useEffect, useRef, useState } from 'react'
-import { DefaultSpinner, Editor, Tldraw } from 'tldraw'
+import { Editor, Tldraw } from 'tldraw'
+import { RealtimeWhiteboard } from './components/RealtimeWhiteboard'
 import { MODEL_CONFIGS, ModelType } from './modelConfig'
 import { useTldrawAiExample } from './useTldrawAiExample'
 
 function App() {
 	const [editor, setEditor] = useState<Editor | null>(null)
 	const [selectedModel, setSelectedModel] = useState<ModelType>('gpt-4.1-2025-04-14')
+	const isRealtimeModel = MODEL_CONFIGS[selectedModel].supportsRealtime
+
+	const handleEditorMount = useCallback((editor: Editor) => {
+		setEditor(editor)
+		;(window as any).editor = editor
+	}, [])
 
 	return (
 		<div className="tldraw-ai-container">
-			<Tldraw persistenceKey="tldraw-ai-demo" onMount={setEditor} />
+			<Tldraw
+				onMount={handleEditorMount}
+				autoFocus
+				components={{
+					ErrorFallback: () => (
+						<div className="error-message">
+							An error occurred while loading the whiteboard. Please try refreshing the page.
+						</div>
+					),
+				}}
+				inferDarkMode
+				persistenceKey="tldraw-ai-demo"
+			/>
 			{editor && (
-				<InputBar editor={editor} selectedModel={selectedModel} onModelChange={setSelectedModel} />
+				<>
+					{isRealtimeModel ? (
+						<RealtimeWhiteboard editor={editor} selectedModel={selectedModel} />
+					) : (
+						<InputBar
+							editor={editor}
+							selectedModel={selectedModel}
+							onModelChange={setSelectedModel}
+						/>
+					)}
+				</>
 			)}
 		</div>
 	)
@@ -82,19 +111,24 @@ function InputBar({ editor, selectedModel, onModelChange }: InputBarProps) {
 	return (
 		<div className="prompt-input">
 			<form onSubmit={handleSubmit}>
+				<input
+					type="text"
+					name="input"
+					placeholder={isGenerating ? 'Generating...' : 'Enter your prompt...'}
+					disabled={isGenerating}
+				/>
+				<button type="submit">{isGenerating ? 'Stop' : 'Send'}</button>
 				<select
+					className="model-selector"
 					value={selectedModel}
 					onChange={(e) => onModelChange(e.target.value as ModelType)}
-					className="model-selector"
 				>
-					{Object.entries(MODEL_CONFIGS).map(([key, config]) => (
-						<option key={key} value={key}>
+					{Object.entries(MODEL_CONFIGS).map(([id, config]) => (
+						<option key={id} value={id}>
 							{config.name}
 						</option>
 					))}
 				</select>
-				<input name="input" type="text" autoComplete="off" placeholder="Enter your prompt…" />
-				<button>{isGenerating ? <DefaultSpinner /> : 'Send'}</button>
 			</form>
 		</div>
 	)
