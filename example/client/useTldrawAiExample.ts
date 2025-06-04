@@ -1,7 +1,10 @@
-import { TLAiChange, TLAiResult, useTldrawAi } from '@tldraw/ai'
+import type { TLAiChange } from '@tldraw/ai'
+import { useTldrawAi } from '@tldraw/ai'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Editor } from 'tldraw'
 import { ModelType } from './modelConfig'
-import { ShapeDescriptions, SimpleCoordinates, SimpleIds } from './transforms/index'
+import { createModelHandler } from './modelHandler'
+import { getEventEmitter, handleRealtimeStream, isProcessingSpeechInput } from './realtimeHandler'
 
 // Add type declarations for Web Speech API and Realtime API
 declare global {
@@ -86,10 +89,47 @@ interface EphemeralKeyResponse {
 	key: string
 }
 
+interface SessionResponse {
+	client_secret?: {
+		value: string
+	}
+}
+
 // Audio element for playing remote audio
 const audioElement = typeof window !== 'undefined' ? new Audio() : null
 if (audioElement) {
 	audioElement.autoplay = true
+
+	// Add error handling for audio element
+	audioElement.onerror = (e) => {
+		console.error('❌ Audio element error:', e)
+	}
+
+	// Add state change logging
+	audioElement.onplay = () => console.log('▶️ Audio started playing')
+	audioElement.onpause = () => console.log('⏸️ Audio paused')
+	audioElement.onended = () => console.log('⏹️ Audio ended')
+}
+
+// Add new interfaces for WebRTC events
+interface WebRTCEvents {
+	'input_audio_buffer.speech_started': {}
+	'input_audio_buffer.speech_stopped': {}
+	'response.audio_transcript.delta': { text: string }
+	'response.done': {}
+}
+
+interface WebRTCEvent<T extends keyof WebRTCEvents> {
+	type: T
+	text?: string
+}
+
+interface CustomPromptOptions {
+	message: string
+	stream?: boolean
+	meta?: {
+		model: ModelType
+	}
 }
 
 /**
@@ -99,383 +139,132 @@ if (audioElement) {
  * @param selectedModel - The selected AI model to use
  */
 export function useTldrawAiExample(editor: Editor, selectedModel: ModelType) {
-	const ai = useTldrawAi({
-		editor,
-		transforms: [SimpleIds, ShapeDescriptions, SimpleCoordinates],
-		generate: async ({ editor, prompt, signal }: GenerateParams) => {
-			try {
-				// Add error handling for image generation
-				if (!prompt.image) {
-					console.log('No image in prompt, proceeding without image')
-				}
+	const modelConfig = useMemo(
+		() => createModelHandler(selectedModel, editor),
+		[selectedModel, editor]
+	)
+	const ai = useTldrawAi(modelConfig)
+	const isSpeakingRef = useRef(false)
+	const [isProcessing, setIsProcessing] = useState(false)
+	const streamRef = useRef<AsyncGenerator<TLAiChange> | null>(null)
 
-				const res = await fetch('/generate', {
-					method: 'POST',
-					body: JSON.stringify({
-						...prompt,
-						meta: {
-							// Always use GPT-4.1 for drawing
-							model: 'gpt-4.1-2025-04-14',
-						},
-					}),
-					headers: {
-						'Content-Type': 'application/json',
-					},
-					signal,
-				})
-
-				if (!res.ok) {
-					throw new Error(`Generate request failed: ${res.statusText}`)
-				}
-
-				const result: TLAiResult = await res.json()
-				return result.changes
-			} catch (err) {
-				console.error('Generate error:', err)
-				if (err instanceof Error && err.message.includes('Could not construct image')) {
-					// If image construction fails, try again without the image
-					console.log('Retrying without image...')
-					const res = await fetch('/generate', {
-						method: 'POST',
-						body: JSON.stringify({
-							...prompt,
-							image: undefined,
-							meta: {
-								// Always use GPT-4.1 for drawing
-								model: 'gpt-4.1-2025-04-14',
-							},
-						}),
-						headers: {
-							'Content-Type': 'application/json',
-						},
-						signal,
-					})
-
-					if (!res.ok) {
-						throw new Error(`Generate retry failed: ${res.statusText}`)
+	// Set up event handlers
+	useEffect(() => {
+		if (selectedModel === 'gpt-4o-realtime-preview-2025-06-03') {
+			const textMessageHandler = (event: CustomEvent) => {
+				const { text } = event.detail
+				if (window.speechSynthesis && text) {
+					const utterance = new SpeechSynthesisUtterance(text)
+					utterance.onstart = () => {
+						isSpeakingRef.current = true
 					}
-
-					const result: TLAiResult = await res.json()
-					return result.changes
-				}
-				throw err
-			}
-		},
-		stream: async function* ({ editor, prompt, signal }: GenerateParams) {
-			// For the realtime model, we don't yield any changes here
-			// Instead, we handle it in the custom stream function
-			if (selectedModel === 'gpt-4o-realtime-preview-2025-06-03') {
-				return []
-			}
-
-			const res = await fetch('/stream', {
-				method: 'POST',
-				body: JSON.stringify({ ...prompt, meta: { model: selectedModel } }),
-				headers: {
-					'Content-Type': 'application/json',
-				},
-				signal,
-			})
-
-			if (!res.body) {
-				throw Error('No body in response')
-			}
-
-			const reader = res.body.getReader()
-			const decoder = new TextDecoder()
-			let buffer = ''
-
-			try {
-				while (true) {
-					const { value, done } = await reader.read()
-					if (done) break
-
-					buffer += decoder.decode(value, { stream: true })
-					const events = buffer.split('\n\n')
-					buffer = events.pop() || ''
-
-					for (const event of events) {
-						const match = event.match(/^data: (.+)$/m)
-						if (match) {
-							try {
-								const parsed = JSON.parse(match[1])
-								yield parsed as TLAiChange
-							} catch (err) {
-								console.error(err)
-								throw Error(`JSON parsing error: ${match[1]}`)
-							}
-						}
+					utterance.onend = () => {
+						isSpeakingRef.current = false
 					}
-				}
-			} finally {
-				reader.releaseLock()
-			}
-		},
-	})
-
-	const handleRealtimeStream = async function* (prompt: string) {
-		console.log('🎙️ Starting realtime stream with prompt:', prompt)
-		try {
-			// First, get an ephemeral key
-			console.log('🔑 Requesting ephemeral key...')
-			const ephemeralKeyRes = await fetch('/api/ephemeral-key', {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-				},
-				body: JSON.stringify({
-					ttl_seconds: 60, // Key expires in 1 minute
-				}),
-			})
-
-			if (!ephemeralKeyRes.ok) {
-				const error = await ephemeralKeyRes.text()
-				console.error('❌ Failed to get ephemeral key:', error)
-				throw new Error('Failed to get ephemeral key')
-			}
-
-			const data = (await ephemeralKeyRes.json()) as EphemeralKeyResponse
-			const ephemeralKey = data.key
-
-			if (!ephemeralKey) {
-				console.error('❌ No key in response')
-				throw new Error('No key in response')
-			}
-
-			console.log('✅ Successfully got ephemeral key')
-
-			// Initialize WebRTC connection
-			console.log('🔄 Initializing WebRTC connection...')
-			const pc = new RTCPeerConnection({
-				iceServers: [
-					{ urls: 'stun:stun.l.google.com:19302' },
-					{ urls: 'stun:global.stun.twilio.com:3478' },
-				],
-			})
-
-			// Set up ICE candidate handling
-			pc.onicecandidate = (event) => {
-				if (event.candidate) {
-					console.log('🧊 New ICE candidate:', event.candidate.type)
+					window.speechSynthesis.speak(utterance)
 				}
 			}
 
-			pc.oniceconnectionstatechange = () => {
-				console.log('🔄 ICE connection state changed to:', pc.iceConnectionState)
+			const micStateHandler = (event: CustomEvent) => {
+				const { enabled } = event.detail
+				console.log('🎤 Microphone state changed:', enabled ? 'ON' : 'OFF')
+				setIsProcessing(isProcessingSpeechInput())
 			}
 
-			// Set up audio element for remote audio playback
-			if (audioElement) {
-				pc.ontrack = (event) => {
-					audioElement.srcObject = event.streams[0]
+			const emitter = getEventEmitter()
+			emitter.addEventListener('text-message', textMessageHandler as EventListener)
+			emitter.addEventListener('mic-state-change', micStateHandler as EventListener)
+
+			return () => {
+				emitter.removeEventListener('text-message', textMessageHandler as EventListener)
+				emitter.removeEventListener('mic-state-change', micStateHandler as EventListener)
+				if (window.speechSynthesis) {
+					window.speechSynthesis.cancel()
 				}
 			}
-
-			// Set up local audio input
-			try {
-				const mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true })
-				mediaStream.getTracks().forEach((track) => {
-					pc.addTrack(track, mediaStream)
-				})
-			} catch (err) {
-				console.error('Failed to get microphone access:', err)
-				throw new Error('Microphone access required')
-			}
-
-			// Create data channel
-			console.log('📡 Creating data channel...')
-			const dc = pc.createDataChannel('oai-events', {
-				ordered: true,
-			})
-
-			// Create a promise to handle messages
-			const messageQueue: Array<{ type: string; text: string }> = []
-			let resolveNext: ((value: { type: string; text: string } | undefined) => void) | null = null
-
-			dc.onopen = () => {
-				console.log('✅ Data channel opened')
-				// Send session configuration
-				console.log('📝 Sending session configuration...')
-				dc.send(
-					JSON.stringify({
-						type: 'session.update',
-						session: {
-							voice: 'alloy',
-							instructions: TUTOR_SYSTEM_PROMPT,
-							input_audio_format: 'pcm16',
-							input_audio_transcription: {
-								model: 'whisper-1',
-							},
-							turn_detection: {
-								type: 'server_vad',
-								threshold: 0.5,
-								prefix_padding_ms: 300,
-								silence_duration_ms: 200,
-								create_response: true,
-							},
-							output_audio: {
-								enable_chunking: true,
-								chunk_size_ms: 500,
-							},
-						},
-					})
-				)
-
-				// Send initial prompt
-				console.log('💬 Sending initial prompt:', prompt)
-				dc.send(
-					JSON.stringify({
-						type: 'conversation.item.create',
-						item: {
-							role: 'user',
-							content: prompt,
-						},
-					})
-				)
-			}
-
-			dc.onmessage = (event) => {
-				try {
-					const msg = JSON.parse(event.data)
-					console.log('📥 Received message type:', msg.type)
-					if (msg.type === 'response.audio_transcript.delta' && msg.text) {
-						console.log('🗣️ Received transcript:', msg.text)
-						const response = { type: 'text', text: msg.text }
-						if (resolveNext) {
-							resolveNext(response)
-							resolveNext = null
-						} else {
-							messageQueue.push(response)
-						}
-					}
-				} catch (err) {
-					console.error('❌ Error handling message:', err)
-				}
-			}
-
-			dc.onerror = (error) => {
-				console.error('❌ Data channel error:', error)
-			}
-
-			dc.onclose = () => {
-				console.log('🔒 Data channel closed')
-			}
-
-			// Create and send offer
-			console.log('📤 Creating WebRTC offer...')
-			const offer = await pc.createOffer({
-				offerToReceiveAudio: true,
-			})
-			await pc.setLocalDescription(offer)
-
-			// Get answer from OpenAI
-			console.log('🤖 Getting answer from OpenAI...')
-			const res = await fetch(
-				`${OPENAI_API_BASE}/v1/realtime?model=gpt-4o-realtime-preview-2025-06-03`,
-				{
-					method: 'POST',
-					headers: {
-						Authorization: `Bearer ${ephemeralKey}`,
-						'Content-Type': 'application/sdp',
-					},
-					body: pc.localDescription!.sdp,
-				}
-			)
-
-			if (!res.ok) {
-				const error = await res.text()
-				console.error('❌ Failed to get WebRTC answer:', error)
-				throw new Error('Failed to get WebRTC answer from OpenAI')
-			}
-
-			const answer = await res.text()
-			console.log('✅ Received WebRTC answer, setting remote description...')
-			await pc.setRemoteDescription({ type: 'answer', sdp: answer })
-
-			// Yield messages as they come in
-			try {
-				console.log('🔄 Starting message processing loop...')
-				while (true) {
-					const nextMessage = messageQueue.shift()
-					if (nextMessage) {
-						console.log('📤 Yielding message:', nextMessage)
-						yield nextMessage
-					} else {
-						// Wait for the next message
-						console.log('⏳ Waiting for next message...')
-						const message = await new Promise<{ type: string; text: string } | undefined>(
-							(resolve) => {
-								resolveNext = resolve
-								// Add timeout to avoid infinite wait
-								setTimeout(() => {
-									console.log('⚠️ Message wait timeout')
-									resolve(undefined)
-								}, 10000)
-							}
-						)
-						if (message) {
-							console.log('📤 Yielding message from wait:', message)
-							yield message
-						}
-					}
-				}
-			} finally {
-				// Cleanup
-				console.log('🧹 Cleaning up WebRTC connection...')
-				dc.close()
-				pc.close()
-				// Cleanup audio resources
-				if (audioElement) {
-					audioElement.srcObject = null
-				}
-			}
-		} catch (err) {
-			console.error('❌ Realtime streaming error:', err)
-			// Cleanup audio resources
-			if (audioElement) {
-				audioElement.srcObject = null
-			}
-			throw err
 		}
-	}
+	}, [selectedModel])
+
+	const handleInput = useCallback(
+		async (text: string) => {
+			if (selectedModel === 'gpt-4o-realtime-preview-2025-06-03') {
+				try {
+					setIsProcessing(true)
+					// For real-time model, handle drawing separately from speech
+					const drawingPromise = ai.prompt({
+						message: text,
+						meta: { model: 'gpt-4.1-2025-04-14' },
+					} as CustomPromptOptions).promise
+
+					// Initialize speech stream if not already done
+					if (!streamRef.current) {
+						streamRef.current = handleRealtimeStream(text)
+					}
+
+					// Wait for drawing to complete
+					await drawingPromise
+				} finally {
+					setIsProcessing(false)
+				}
+			} else {
+				// For text-only models, just handle the drawing
+				await ai.prompt({
+					message: text,
+					meta: { model: selectedModel },
+				} as CustomPromptOptions).promise
+			}
+		},
+		[ai, selectedModel]
+	)
 
 	return {
-		prompt: ai.prompt,
+		prompt: handleInput,
 		repeat: ai.repeat,
-		cancel: ai.cancel,
-		generate: async (prompt: any) => {
+		cancel: () => {
+			ai.cancel()
+			if (window.speechSynthesis) {
+				window.speechSynthesis.cancel()
+			}
+			// Don't reset streamRef here - let it maintain the WebRTC connection
+			setIsProcessing(false)
+		},
+		generate: async (prompt: CustomPromptOptions) => {
 			const { promise } = ai.prompt({
 				...prompt,
-				meta: { model: 'gpt-4.1-2025-04-14' },
-			})
+				meta: { model: selectedModel },
+			} as CustomPromptOptions)
 			return promise
 		},
-		stream: async function* (prompt: any) {
+		stream: async function* (prompt: CustomPromptOptions) {
 			if (selectedModel === 'gpt-4o-realtime-preview-2025-06-03') {
-				// First, immediately start the drawing process with GPT-4.1
-				const drawingPromise = ai.prompt({
-					...prompt,
-					meta: { model: 'gpt-4.1-2025-04-14' },
-				}).promise
-
-				// Start the realtime speech stream
+				setIsProcessing(true)
 				try {
-					for await (const chunk of handleRealtimeStream(prompt.message)) {
-						yield chunk
+					// Start the drawing process with GPT-4.1
+					const drawingPromise = ai.prompt({
+						...prompt,
+						meta: { model: 'gpt-4.1-2025-04-14' },
+					} as CustomPromptOptions).promise
+
+					// Initialize or use existing speech stream
+					if (!streamRef.current) {
+						streamRef.current = handleRealtimeStream(prompt.message)
 					}
-				} catch (e) {
-					console.error('Speech streaming error:', e)
-				}
 
-				// Wait for the drawing to complete
-				try {
-					await drawingPromise
-				} catch (e) {
-					console.error('Drawing error:', e)
+					// Wait for the drawing to complete
+					try {
+						await drawingPromise
+					} catch (e) {
+						console.error('Drawing error:', e)
+					}
+				} finally {
+					setIsProcessing(false)
 				}
 			} else {
 				// For other models, just use regular streaming
-				const { promise } = ai.prompt({ ...prompt, stream: true })
+				const { promise } = ai.prompt({
+					...prompt,
+					stream: true,
+				} as CustomPromptOptions)
 				try {
 					await promise
 				} catch (e) {
@@ -483,5 +272,7 @@ export function useTldrawAiExample(editor: Editor, selectedModel: ModelType) {
 				}
 			}
 		},
+		isSpeaking: () => isSpeakingRef.current,
+		isProcessing: () => isProcessing,
 	}
 }

@@ -28,12 +28,13 @@ interface SpeechRecognition extends EventTarget {
 	onend: () => void
 }
 
-interface SpeechInterfaceProps {
+export interface SpeechInterfaceProps {
 	onSpeechInput: (text: string) => void
 	isListening: boolean
 	onToggleListening: () => void
-	onVoiceChange?: (voice: string) => void
-	isSpeaking?: boolean
+	onVoiceChange: (voice: string) => void
+	isSpeaking: boolean
+	disabled?: boolean
 }
 
 // Available OpenAI voices
@@ -51,7 +52,8 @@ export function SpeechInterface({
 	isListening,
 	onToggleListening,
 	onVoiceChange,
-	isSpeaking = false,
+	isSpeaking,
+	disabled = false,
 }: SpeechInterfaceProps) {
 	const [error, setError] = useState<string>('')
 	const [selectedVoice, setSelectedVoice] = useState('alloy')
@@ -154,7 +156,7 @@ export function SpeechInterface({
 		(event: React.ChangeEvent<HTMLSelectElement>) => {
 			const voice = event.target.value
 			setSelectedVoice(voice)
-			onVoiceChange?.(voice)
+			onVoiceChange(voice)
 		},
 		[onVoiceChange]
 	)
@@ -175,12 +177,17 @@ export function SpeechInterface({
 					onClick={onToggleListening}
 					className={`speech-button ${isListening ? 'listening' : ''} ${isSpeaking ? 'ai-speaking' : ''}`}
 					title={isListening ? 'Stop listening' : 'Start listening'}
-					disabled={isSpeaking}
+					disabled={disabled}
 				>
 					{isSpeaking ? '🔊 AI Speaking...' : isListening ? '🎤 Listening...' : '🎤 Start'}
 				</button>
 
-				<select value={selectedVoice} onChange={handleVoiceChange} className="voice-selector">
+				<select
+					value={selectedVoice}
+					onChange={handleVoiceChange}
+					className="voice-selector"
+					disabled={disabled}
+				>
 					{AVAILABLE_VOICES.map((voice) => (
 						<option key={voice.id} value={voice.id}>
 							{voice.name}

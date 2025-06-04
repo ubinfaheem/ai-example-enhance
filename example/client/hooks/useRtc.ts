@@ -36,18 +36,10 @@ interface SessionResponse {
 	}
 }
 
-declare global {
-	var SpeechRecognition: {
-		prototype: SpeechRecognition
-		new (): SpeechRecognition
-	}
-	var webkitSpeechRecognition: {
-		prototype: SpeechRecognition
-		new (): SpeechRecognition
-	}
-	interface Window {
-		SpeechRecognition: typeof SpeechRecognition
-		webkitSpeechRecognition: typeof webkitSpeechRecognition
+interface WhiteboardResponse {
+	instructions?: {
+		type: string
+		data: any
 	}
 }
 
@@ -124,13 +116,12 @@ export function useRtc(tldrawRef?: RefObject<Editor | null>): Return {
 	const pcRef = useRef<RTCPeerConnection | null>(null)
 	const dcRef = useRef<RTCDataChannel | null>(null)
 	const audioElRef = useRef<HTMLAudioElement | null>(null)
-	const srRef = useRef<any | null>(null) // Using any for now since we're using the native Web Speech API
 	const micTrack = useRef<MediaStreamTrack | null>(null)
 	const lastUser = useRef('')
 
 	/* React state ---------------------------------------------------- */
 	const [isConnected, setConn] = useState(false)
-	const [micEnabled, setMic] = useState(true)
+	const [micEnabled, setMic] = useState(false)
 	const [transcript, setTxt] = useState('')
 	const [aiSpeaking, setAiSp] = useState(false)
 	const [userSpeaking, setUsrSp] = useState(false)
@@ -160,6 +151,45 @@ export function useRtc(tldrawRef?: RefObject<Editor | null>): Return {
 		setMic(micTrack.current.enabled)
 	}, [])
 
+	/* Send transcribed text to GPT-4.1 for whiteboard manipulation --- */
+	const sendToGpt41 = async (text: string) => {
+		try {
+			const response = await fetch(`${API}/whiteboard`, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+				},
+				body: JSON.stringify({
+					model: 'gpt-4.1-2025-04-14',
+					messages: [
+						{
+							role: 'system',
+							content:
+								'You are a helpful AI that translates natural language into whiteboard drawing instructions.',
+						},
+						{
+							role: 'user',
+							content: text,
+						},
+					],
+				}),
+			})
+
+			const data = (await response.json()) as WhiteboardResponse
+			if (data.instructions && tldrawRef?.current) {
+				const { type, data: shapeData } = data.instructions
+				const shapeId = shapeData.id || tldrawRef.current.createShape({ type }).id
+				tldrawRef.current.updateShape({
+					id: shapeId,
+					type,
+					...shapeData,
+				})
+			}
+		} catch (err) {
+			logError('[RTC] GPT-4.1 whiteboard error:', err)
+		}
+	}
+
 	const initializeTutor = (dc: RTCDataChannel) => {
 		// Send session configuration
 		dc.send(
@@ -171,6 +201,8 @@ export function useRtc(tldrawRef?: RefObject<Editor | null>): Return {
 					input_audio_format: 'pcm16',
 					input_audio_transcription: {
 						model: 'whisper-1',
+						language: 'en',
+						return_text: true,
 					},
 					turn_detection: {
 						type: 'server_vad',
@@ -196,30 +228,24 @@ export function useRtc(tldrawRef?: RefObject<Editor | null>): Return {
 		)
 	}
 
-	/* ----------------------------------------------------------------
-	   cleanup helper
-	----------------------------------------------------------------- */
+	/* cleanup helper ------------------------------------------------- */
 	const cleanup = useCallback(() => {
 		dcRef.current?.close()
 		pcRef.current?.getSenders().forEach((s) => s.track?.stop())
 		pcRef.current?.close()
-		srRef.current?.stop()
 
 		pcRef.current = null
 		dcRef.current = null
-		srRef.current = null
 		audioElRef.current = null
 		micTrack.current = null
 
 		setConn(false)
-		setMic(true)
+		setMic(false)
 		setAiSp(false)
 		setUsrSp(false)
 	}, [])
 
-	/* ----------------------------------------------------------------
-	   CONNECT
-	----------------------------------------------------------------- */
+	/* CONNECT ------------------------------------------------------ */
 	const connect = async (voice: string, modelId: string, sys?: string) => {
 		if (isConnected) return
 
@@ -251,33 +277,15 @@ export function useRtc(tldrawRef?: RefObject<Editor | null>): Return {
 			/* 3 ─ mic --------------------------------------------------- */
 			const ms = await navigator.mediaDevices.getUserMedia({ audio: true })
 			micTrack.current = ms.getAudioTracks()[0]
+			micTrack.current.enabled = false // Initialize as disabled
 			pc.addTrack(micTrack.current)
-			setMic(true)
+			setMic(false)
 
-			/* 4 ─ browser speech-rec ----------------------------------- */
-			const SpeechRecognition =
-				(window as any).webkitSpeechRecognition || (window as any).SpeechRecognition
-			if (SpeechRecognition) {
-				const sr = new SpeechRecognition()
-				sr.lang = 'en-US'
-				sr.continuous = true
-				sr.interimResults = true
-				sr.onresult = (event: any) => {
-					const result = event.results[event.resultIndex][0]
-					const txt = result.transcript.trim()
-					if (!result.isFinal && txt.length < lastUser.current.length) return
-					render('👤', txt, result.isFinal)
-				}
-				sr.start()
-				srRef.current = sr
-			}
-
-			/* 5 ─ data-channel ----------------------------------------- */
+			/* 4 ─ data-channel ----------------------------------------- */
 			const dc = pc.createDataChannel('oai-events')
 			dcRef.current = dc
 
 			dc.onopen = () => {
-				// Initialize tutor when data channel opens
 				initializeTutor(dc)
 			}
 
@@ -292,7 +300,6 @@ export function useRtc(tldrawRef?: RefObject<Editor | null>): Return {
 				log('%c[RTC] msg.type =', 'color:#03a9f4', msg.type)
 
 				switch (msg.type) {
-					/* ── speaking cues ── */
 					case 'input_audio_buffer.speech_started':
 						setUsrSp(true)
 						break
@@ -301,22 +308,33 @@ export function useRtc(tldrawRef?: RefObject<Editor | null>): Return {
 						break
 					case 'output_audio_buffer.started':
 						setAiSp(true)
-						srRef.current?.stop()
 						break
 					case 'output_audio_buffer.stopped':
 						setAiSp(false)
-						srRef.current?.start()
 						break
-
+					case 'transcript':
+						// Handle transcribed text from OpenAI
+						if (msg.text) {
+							render('👤', msg.text, msg.is_final)
+							// When we get final transcription, send to GPT-4.1 for whiteboard
+							if (msg.is_final) {
+								sendToGpt41(msg.text)
+							}
+						}
+						break
+					case 'response':
+						// Handle AI response text
+						if (msg.text) {
+							render('🤖', msg.text, true)
+						}
+						break
 					case 'session.updated':
 						log('[RTC] Session configured:', msg.session)
 						break
-
-					// ... rest of your existing message handlers ...
 				}
 			}
 
-			/* 6 ─ SDP with OpenAI MCU ---------------------------------- */
+			/* 5 ─ SDP with OpenAI MCU ---------------------------------- */
 			await pc.setLocalDescription(await pc.createOffer())
 			const ans = await fetch(`https://api.openai.com/v1/realtime?model=${modelId}`, {
 				method: 'POST',
@@ -328,7 +346,7 @@ export function useRtc(tldrawRef?: RefObject<Editor | null>): Return {
 			}).then((r) => r.text())
 			await pc.setRemoteDescription({ type: 'answer', sdp: ans })
 
-			setConn(true) // ✅ live
+			setConn(true)
 		} catch (err) {
 			logError('[RTC] connect error:', err)
 			cleanup()
@@ -342,7 +360,6 @@ export function useRtc(tldrawRef?: RefObject<Editor | null>): Return {
 	}
 	useEffect(() => disconnect, []) // unmount
 
-	/* return to caller --------------------------------------------- */
 	return {
 		connect,
 		disconnect,

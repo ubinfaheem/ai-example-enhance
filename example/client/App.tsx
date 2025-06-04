@@ -15,51 +15,29 @@ function TldrawAiContainer({ editor }: { editor: Editor }) {
 	const [selectedVoice, setSelectedVoice] = useState('alloy')
 	const [inputValue, setInputValue] = useState('')
 	const abortControllerRef = useRef<AbortController | null>(null)
-	const { generate, stream } = useTldrawAiExample(editor, selectedModel)
+	const { prompt, cancel } = useTldrawAiExample(editor, selectedModel)
 
-	const handleSpeechInput = useCallback(
+	const handleInput = useCallback(
 		async (text: string) => {
 			if (isBusy) return
 
 			console.log('🎯 Processing input:', { text, model: selectedModel })
 			setIsBusy(true)
 			setIsLoading(true)
+
 			// Store current listening state
 			const wasListening = isListening
 			if (wasListening) {
 				setIsListening(false)
 			}
+
+			// Cancel any ongoing operations
 			abortControllerRef.current?.abort()
 			abortControllerRef.current = new AbortController()
 
 			try {
-				// Always use GPT-4.1 for drawing, regardless of the selected model
-				console.log('🎨 Starting drawing with GPT-4.1')
-				const drawingPromise = generate({ message: text })
-
-				// If using realtime model, handle speech
-				if (selectedModel === 'gpt-4o-realtime-preview-2025-06-03') {
-					console.log('🎙️ Using realtime model for speech with voice:', selectedVoice)
-					for await (const change of stream({
-						message: text,
-						voice: selectedVoice,
-					})) {
-						if (change.type === 'speak') {
-							console.log('🗣️ AI speaking:', change.text)
-							setIsSpeaking(true)
-							const utterance = new SpeechSynthesisUtterance(change.text)
-							utterance.onend = () => {
-								console.log('🔇 AI finished speaking')
-								setIsSpeaking(false)
-							}
-							window.speechSynthesis.speak(utterance)
-						}
-					}
-				}
-
-				// Wait for the drawing to complete
-				await drawingPromise
-				console.log('✅ Drawing completed')
+				await prompt(text)
+				console.log('✅ Input processing completed')
 			} catch (e) {
 				console.error('❌ Error processing input:', e)
 			} finally {
@@ -70,27 +48,27 @@ function TldrawAiContainer({ editor }: { editor: Editor }) {
 				if (wasListening) {
 					setIsListening(true)
 				}
-				console.log('🔄 Input processing completed')
 			}
 		},
-		[generate, stream, selectedModel, isBusy, selectedVoice, isListening]
+		[prompt, selectedModel, isBusy, isListening]
 	)
 
 	const handleTextSubmit: FormEventHandler = (e) => {
 		e.preventDefault()
 		if (!inputValue.trim()) return
 		console.log('📝 Text input submitted:', inputValue)
-		handleSpeechInput(inputValue)
+		handleInput(inputValue)
 		setInputValue('')
 	}
 
 	const handleToggleListening = useCallback(() => {
+		if (isBusy) return
 		setIsListening((prev) => {
 			const newState = !prev
 			console.log(`🎤 Microphone ${newState ? 'enabled' : 'disabled'}`)
 			return newState
 		})
-	}, [])
+	}, [isBusy])
 
 	const handleVoiceChange = useCallback((voice: string) => {
 		console.log('🔊 Voice changed to:', voice)
@@ -104,6 +82,7 @@ function TldrawAiContainer({ editor }: { editor: Editor }) {
 					value={selectedModel}
 					onChange={(e) => setSelectedModel(e.target.value as ModelType)}
 					className="model-selector"
+					disabled={isBusy}
 				>
 					{Object.entries(MODEL_CONFIGS).map(([id, config]) => (
 						<option key={id} value={id}>
@@ -112,27 +91,46 @@ function TldrawAiContainer({ editor }: { editor: Editor }) {
 					))}
 				</select>
 
-				<SpeechInterface
-					onSpeechInput={handleSpeechInput}
-					isListening={isListening}
-					onToggleListening={handleToggleListening}
-					onVoiceChange={handleVoiceChange}
-					isSpeaking={isSpeaking}
-				/>
+				{/* Show speech interface only for real-time model */}
+				{selectedModel === 'gpt-4o-realtime-preview-2025-06-03' && (
+					<SpeechInterface
+						onSpeechInput={handleInput}
+						isListening={isListening}
+						onToggleListening={handleToggleListening}
+						onVoiceChange={handleVoiceChange}
+						isSpeaking={isSpeaking}
+						disabled={isBusy}
+					/>
+				)}
 
+				{/* Always show text input */}
 				<form onSubmit={handleTextSubmit} className="text-input-form">
 					<input
 						type="text"
 						value={inputValue}
 						onChange={(e) => setInputValue(e.target.value)}
-						placeholder="Or type your prompt here..."
-						disabled={isLoading}
+						placeholder="Type your prompt here..."
+						disabled={isLoading || isBusy}
 						className="text-input"
 					/>
-					<button type="submit" disabled={isLoading} className="submit-button">
+					<button type="submit" disabled={isLoading || isBusy} className="submit-button">
 						{isLoading ? <DefaultSpinner /> : 'Send'}
 					</button>
 				</form>
+
+				{isBusy && (
+					<button
+						onClick={() => {
+							cancel()
+							setIsBusy(false)
+							setIsLoading(false)
+							setIsSpeaking(false)
+						}}
+						className="cancel-button"
+					>
+						Cancel
+					</button>
+				)}
 			</div>
 
 			{isLoading && (
@@ -191,6 +189,7 @@ function InputBar({ editor, selectedModel, onModelChange, onSubmit, isLoading }:
 					))}
 				</select>
 				<input
+					className="text-input"
 					type="text"
 					value={inputValue}
 					onChange={(e) => setInputValue(e.target.value)}
