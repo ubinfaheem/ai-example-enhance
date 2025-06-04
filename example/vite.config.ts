@@ -6,5 +6,18 @@ import { defineConfig } from 'vite'
 export default defineConfig(({ mode }) => {
 	return {
 		plugins: [cloudflare(), react()],
+		server: {
+			proxy: {
+				'/api/ephemeral-key': {
+					target: 'https://api.openai.com/v1/realtime/keys',
+					changeOrigin: true,
+					rewrite: () => '/v1/realtime/keys',
+					headers: {
+						Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+						'Content-Type': 'application/json',
+					},
+				},
+			},
+		},
 	}
 })

@@ -5,6 +5,7 @@ export const ModelType = z.enum([
 	'gemini-pro',
 	'gpt-4o-2024-11-20',
 	'o4-mini-2025-04-16',
+	'gpt-4o-realtime-preview-2025-06-03',
 ])
 export type ModelType = z.infer<typeof ModelType>
 
@@ -28,6 +29,10 @@ export const MODEL_CONFIGS = {
 		name: 'Gemini Pro',
 		model: 'gemini-pro',
 		provider: 'google',
+	},
+	'gpt-4o-realtime-preview-2025-06-03': {
+		name: 'GPT-4 Realtime',
+		description: 'Realtime tutor model for interactive learning',
 	},
 } as const
 

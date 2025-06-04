@@ -62,3 +62,58 @@ body {
 	cursor: pointer;
 	font-family: 'Inter', sans-serif;
 }
+
+/* Speech interface */
+.speech-interface {
+	position: fixed;
+	bottom: 60px;
+	right: 20px;
+	z-index: 100;
+}
+
+.speech-button {
+	width: 120px;
+	height: 40px;
+	border-radius: 20px;
+	border: none;
+	background: hsl(214, 84%, 56%);
+	color: white;
+	cursor: pointer;
+	font-family: 'Inter', sans-serif;
+	font-size: 14px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 8px;
+	transition: all 0.2s ease;
+}
+
+.speech-button.listening {
+	background: hsl(0, 84%, 56%);
+	animation: pulse 2s infinite;
+}
+
+.speech-error {
+	position: absolute;
+	bottom: 100%;
+	right: 0;
+	background: hsl(0, 84%, 56%);
+	color: white;
+	padding: 8px 16px;
+	border-radius: 4px;
+	margin-bottom: 8px;
+	font-size: 12px;
+	white-space: nowrap;
+}
+
+@keyframes pulse {
+	0% {
+		transform: scale(1);
+	}
+	50% {
+		transform: scale(1.05);
+	}
+	100% {
+		transform: scale(1);
+	}
+}
