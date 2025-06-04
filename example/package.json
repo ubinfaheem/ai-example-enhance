@@ -17,6 +17,7 @@
 	"dependencies": {
 		"@google/generative-ai": "^0.21.0",
 		"@tldraw/ai": "workspace:",
+		"@tldraw/tldraw": "^3.13.1",
 		"@tldraw/tlschema": "catalog:",
 		"@worker-tools/json-stream": "^0.1.0-pre.12",
 		"best-effort-json-parser": "^1.1.3",
